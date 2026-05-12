@@ -1,303 +1,310 @@
-# Raspberry Pi + Pure Data + Arduino Trackball MIDI Setup
+# Pure Data Erhu MIDI Controller
 
-本文档记录本项目在树莓派上运行 Arduino trackball MIDI 控制 Pure Data 的完整顺序。
+This project runs an erhu sample performance system on a Raspberry Pi. An Arduino reads sensor input and sends MIDI bytes over USB serial. A Python bridge converts the serial MIDI stream into an ALSA virtual MIDI port, and a Pure Data patch receives the MIDI messages to trigger and control erhu samples.
 
-## 目标链路
+## Signal Flow
 
 ```text
-Arduino + trackball
+Arduino sensors
 -> USB Serial
--> Python serial_midi_bridge.py
+-> Python MIDI bridge
 -> ALSA virtual MIDI
--> Pure Data [ctlin 1]
--> 第 1 个声音音量
+-> Pure Data
+-> USB audio output
 ```
 
-Arduino 发送 MIDI CC：
+## Project Files
 
 ```text
-control_change channel=0 control=1 value=0-127
+erhu-dmajor.pd                 Main Pure Data patch
+1.WAV - 8.WAV                  Erhu sample audio files
+mpr121.ino                     Arduino sensor and MIDI output sketch
+serial_midi_bridge_notes_cc.py Serial MIDI to ALSA virtual MIDI bridge
+README.md                      Project setup and usage guide
 ```
 
-Pure Data 补丁中接收：
+## Hardware
+
+- Raspberry Pi
+- Arduino
+- MPR121 capacitive touch sensor
+- IR sensor
+- USB audio interface or USB speaker
+
+Connect the hardware as follows:
 
 ```text
-[ctlin 1]
-|
-[/ 127]
-|
-[pack f 30]
-|
-[line]
-|
-第 1 个声音 volume slider
+Arduino -> Raspberry Pi USB
+USB audio device -> Raspberry Pi USB
 ```
 
-## 1. 插好硬件
+## MIDI Mapping
+
+The Arduino sends standard MIDI bytes over serial at 115200 baud.
+
+Touch inputs are mapped to six Pure Data sound toggles:
 
 ```text
-Arduino + trackball -> 树莓派 USB
-USB 声卡/音箱 -> 树莓派 USB
+MPR121 pad 1  -> MIDI note 60 -> sound 1
+MPR121 pad 3  -> MIDI note 61 -> sound 2
+MPR121 pad 5  -> MIDI note 62 -> sound 3
+MPR121 pad 6  -> MIDI note 63 -> sound 4
+MPR121 pad 8  -> MIDI note 64 -> sound 5
+MPR121 pad 10 -> MIDI note 65 -> sound 6
 ```
 
-## 2. 确认 Arduino 串口
+Continuous controllers:
 
-运行：
+```text
+CC 11 -> bow / volume control
+CC 12 -> IR sensor state
+CC 1  -> legacy sound 1 volume control in Pure Data
+```
+
+Main MIDI receivers in the Pure Data patch:
+
+```text
+[notein]   -> route 60 61 62 63 64 65
+[ctlin 11] -> bow / volume control
+[ctlin 1]  -> sound 1 volume control
+```
+
+## Dependencies
+
+Install these on the Raspberry Pi:
+
+- Pure Data
+- ALSA MIDI tools
+- Python 3
+- Python packages: `pyserial`, `mido`, `python-rtmidi`
+
+Example installation:
+
+```bash
+sudo apt update
+sudo apt install puredata alsa-utils python3-pip
+pip3 install pyserial mido python-rtmidi
+```
+
+## Quick Start
+
+### 1. Upload the Arduino Sketch
+
+Upload `mpr121.ino` to the Arduino.
+
+Default settings:
+
+```text
+Serial baud: 115200
+MIDI channel: 1
+IR pin: 6
+Bow CC: 11
+IR state CC: 12
+```
+
+### 2. Check the Arduino Serial Port
 
 ```bash
 ls /dev/ttyACM* /dev/ttyUSB*
 ```
 
-本项目当前识别为：
+Common result:
 
 ```text
 /dev/ttyACM0
 ```
 
-所以 Python bridge 中应使用：
+If the port is different, update `serial_midi_bridge_notes_cc.py`:
 
 ```python
 SERIAL_PORT = "/dev/ttyACM0"
 BAUD_RATE = 115200
 ```
 
-## 3. 启动 Python MIDI bridge
-
-运行：
+### 3. Start the Python MIDI Bridge
 
 ```bash
-python3 /home/chengming1/serial_midi_bridge.py
+python3 serial_midi_bridge_notes_cc.py
 ```
 
-保持这个终端开着。拨动 trackball 时，应该看到类似输出：
+Keep this terminal running. When you touch the MPR121 pads or trigger the IR sensor, you should see output similar to:
 
 ```text
-control_change channel=0 control=1 value=64
-control_change channel=0 control=1 value=71
+note_on channel=0 note=60 velocity=100
+note_off channel=0 note=60 velocity=0
+control_change channel=0 control=11 value=64
 ```
 
-如果没有输出，先检查 Arduino、串口路径、trackball 接线和 Arduino 程序。
+The script creates this ALSA virtual MIDI output port:
 
-## 4. 测试音频设备
+```text
+ArduinoSensors
+```
 
-查看声卡：
+### 4. Test the Audio Output
+
+List audio devices:
 
 ```bash
 aplay -l
 ```
 
-本项目中 USB Audio 是：
-
-```text
-card 2: USB2.0 Device
-```
-
-测试 USB 声卡：
+Test the USB audio device:
 
 ```bash
 speaker-test -D hw:2,0 -c 2 -t sine
 ```
 
-有声音后按 `Ctrl+C` 停止。
+Press `Ctrl+C` once you hear sound. If your USB audio device is not `card 2`, replace `hw:2,0` with the actual device number.
 
-## 5. 启动 Pure Data
-
-新开一个终端：
+### 5. Start Pure Data
 
 ```bash
 pd -alsa -alsamidi -audiooutdev 3 -audiobuf 200 /home/chengming1/Desktop/Puredataforerhu/erhu-dmajor.pd
 ```
 
-参数说明：
+Parameter notes:
 
 ```text
--alsa          使用 ALSA 音频
--alsamidi      使用 ALSA MIDI
--audiooutdev 3 使用第 3 个 PD 音频输出设备，对应 card 2 USB Audio
--audiobuf 200  增大音频缓冲，减少 xrun
+-alsa          Use ALSA audio
+-alsamidi      Use ALSA MIDI
+-audiooutdev 3 Pure Data audio output device number
+-audiobuf 200  Increase audio buffer size to reduce xrun errors
 ```
 
-如果仍然出现 audio xrun，可以把 buffer 增大：
+If the audio is unstable, increase the buffer:
 
 ```bash
 pd -alsa -alsamidi -audiooutdev 3 -audiobuf 300 /home/chengming1/Desktop/Puredataforerhu/erhu-dmajor.pd
 ```
 
-## 6. 设置 Pure Data MIDI 端口
+### 6. Configure Pure Data MIDI
 
-在 PD 中打开：
+In Pure Data, open:
 
 ```text
 Media -> MIDI Settings
 ```
 
-设置：
+Set:
 
 ```text
 In Ports: 1
 Out Ports: 0
 ```
 
-然后点击：
+Then click:
 
 ```text
 Apply -> OK
 ```
 
-Linux 版 PD 没有 Windows 那种设备下拉框是正常的。这里只是让 PD 创建 1 个 MIDI 输入端口。
+On Linux, Pure Data may not show the same MIDI device dropdowns as the Windows version. This is normal. The setting above creates one MIDI input port for Pure Data.
 
-## 7. 查看 ALSA MIDI 端口
+### 7. Connect MIDI Ports
 
-新开一个终端：
+List ALSA MIDI ports:
 
 ```bash
 aconnect -l
 ```
 
-应该看到类似：
+You should see something like:
 
 ```text
 client 128: 'RtMidiOut Client' [type=user]
-    0 'Arduino'
+    0 'ArduinoSensors'
 
 client 129: 'Pure Data' [type=user]
     0 'Pure Data Midi-In 1'
 ```
 
-## 8. 连接 Python bridge 到 Pure Data
-
-如果 Python bridge 是 `128:0`，Pure Data 是 `129:0`，运行：
+Connect the Python bridge to Pure Data:
 
 ```bash
 aconnect 128:0 129:0
 ```
 
-如果编号变了，以 `aconnect -l` 中实际显示的编号为准：
+If the client numbers are different, use the actual numbers shown by `aconnect -l`.
 
-```bash
-aconnect Python编号:0 PureData编号:0
-```
+### 8. Test Performance
 
-## 9. 确认连接成功
-
-再次运行：
-
-```bash
-aconnect -l
-```
-
-应看到类似：
-
-```text
-client 128: 'RtMidiOut Client'
-    0 'Arduino'
-        Connecting To: 129:0
-```
-
-或者：
-
-```text
-client 129: 'Pure Data'
-    0 'Pure Data Midi-In 1'
-        Connected From: 128:0
-```
-
-## 10. 在 Pure Data 中测试
-
-在 PD 中：
+In Pure Data:
 
 ```text
 DSP On
-点击第 1 个 toggle
-拨动 trackball X 轴
+Touch an MPR121 pad
+Trigger the IR sensor
 ```
 
-预期效果：
+Expected behavior:
 
 ```text
-trackball 向右 -> 第 1 个声音音量变大
-trackball 向左 -> 第 1 个声音音量变小
+MPR121 touch -> toggles the corresponding sample sound
+IR movement  -> sends CC 11 to control bow / volume behavior
 ```
 
-注意：trackball 现在只改变第 1 个声音的音量。如果第 1 个声音没有播放，音量变化不会明显听出来。
+## Troubleshooting
 
-## 常见问题
+### The Python bridge prints no MIDI messages
 
-### PD MIDI Settings 没有设备选项
+Check:
 
-Linux 版 PD 这里通常只有：
+- `mpr121.ino` has been uploaded to the Arduino.
+- `SERIAL_PORT` matches the actual Arduino serial port.
+- The Arduino USB connection is working.
+- The MPR121 and IR sensor wiring is correct.
 
-```text
-In Ports
-Out Ports
-```
+### `aconnect -l` does not show Pure Data
 
-这是正常的。设置 `In Ports: 1` 后，用 `aconnect` 连接。
-
-### aconnect 中看不到 Pure Data
-
-关闭 PD，用 ALSA MIDI 模式重新启动：
+Make sure Pure Data was started with ALSA MIDI enabled:
 
 ```bash
 pd -alsa -alsamidi -audiooutdev 3 -audiobuf 200 /home/chengming1/Desktop/Puredataforerhu/erhu-dmajor.pd
 ```
 
-然后在 PD MIDI Settings 中设置：
+Then configure MIDI settings in Pure Data:
 
 ```text
 In Ports: 1
 Out Ports: 0
 ```
 
-### aconnect 中看不到 Arduino
+### `aconnect -l` does not show ArduinoSensors
 
-确认 Python bridge 正在运行：
+Make sure the Python bridge is running:
 
 ```bash
-python3 /home/chengming1/serial_midi_bridge.py
+python3 serial_midi_bridge_notes_cc.py
 ```
 
-你的 Python 代码中实际创建的 MIDI port 名称是：
+The virtual MIDI port name is defined in the script:
 
 ```python
-outport = mido.open_output("Arduino", virtual=True)
+MIDI_PORT_NAME = "ArduinoSensors"
 ```
 
-所以在 `aconnect -l` 中会显示：
+### ALSA xrun errors
 
-```text
-client 128: 'RtMidiOut Client'
-    0 'Arduino'
-```
-
-### 出现 ALSA xrun
-
-如果出现：
+If you see:
 
 ```text
 alsa xrun recovery apparently failed
 snd_pcm_recover failed
 ```
 
-通常是音频设备或 buffer 问题。优先使用：
-
-```bash
-pd -alsa -alsamidi -audiooutdev 3 -audiobuf 200 /home/chengming1/Desktop/Puredataforerhu/erhu-dmajor.pd
-```
-
-如果仍然不稳定，改成：
+Increase the Pure Data audio buffer:
 
 ```bash
 pd -alsa -alsamidi -audiooutdev 3 -audiobuf 300 /home/chengming1/Desktop/Puredataforerhu/erhu-dmajor.pd
 ```
 
-### 确认 PD 补丁是新版
+If the problem continues, check the USB audio device number and close other programs that may be using the audio device.
 
-运行：
+### Confirm the Pure Data Patch Includes MIDI Control
 
 ```bash
-grep -n "ctlin 1" /home/chengming1/Desktop/Puredataforerhu/erhu-dmajor.pd
+grep -n "notein\|ctlin" /home/chengming1/Desktop/Puredataforerhu/erhu-dmajor.pd
 ```
 
-如果没有输出，说明树莓派上的 PD 文件不是已加入 MIDI 控制的版本。
-
+The output should include `notein`, `ctlin 11`, and `ctlin 1`.
